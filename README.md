@@ -1,3 +1,2 @@
-# ``ssnet``: a Python module for training State Space neural NETworks
-
-*The source code will be published soon.*
+# ssnet-python
+State Space Neural Networks - A PyTorch-powered interface to perform NN-based system identification
