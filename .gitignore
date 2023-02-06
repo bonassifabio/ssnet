@@ -149,3 +149,4 @@ example*/
 Datasets/
 Benchmarks/
 training_output/
+*.DS_Store
