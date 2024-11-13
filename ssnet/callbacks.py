@@ -35,13 +35,14 @@ import ttictoc
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from .utils import MatFileWriter
+from ssnet.utils import MatFileWriter
 
 if TYPE_CHECKING:
     from .nn import StateSpaceNN
 
+
 @dataclass()
-class PostEpochTrainingData():
+class PostEpochTrainingData:
     epoch: int
     train_loss: float
     train_metric: float
@@ -52,6 +53,7 @@ class PostEpochTrainingData():
     enforce_deltaiss: bool
     metric_fcn: Callable = nn.functional.mse_loss
     washout: int = 0
+
 
 class TrainingCallback:
 
@@ -74,8 +76,8 @@ class TrainingCallback:
         pass
 
     def on_epoch_start(self, net: StateSpaceNN, epoch: int):
-        pass 
-    
+        pass
+
     def on_epoch_end(self, data: PostEpochTrainingData, net: StateSpaceNN):
         return False
 
@@ -85,12 +87,12 @@ class TrainingCallback:
 
 class CallbacksWrapper(TrainingCallback):
 
-    def __init__(self, 
-                 tensorboard_instance: SummaryWriter | str | Path = None, 
+    def __init__(self,
+                 tensorboard_instance: SummaryWriter | str | Path = None,
                  matfile_instance: MatFileWriter | str | Path = None,
                  callbacks: List[TrainingCallback] = None):
         super().__init__()
-        
+
         self.to_close_matfile = False
 
         if tensorboard_instance and isinstance(tensorboard_instance, SummaryWriter):
@@ -101,7 +103,7 @@ class CallbacksWrapper(TrainingCallback):
             self.tensorboard = SummaryWriter(tbpath)
         elif tensorboard_instance:
             raise ValueError('Incorrect tensorboard instance')
-        
+
         if matfile_instance and isinstance(matfile_instance, MatFileWriter):
             self.matfile = matfile_instance
         if matfile_instance and isinstance(matfile_instance, (str, Path)):
@@ -121,22 +123,22 @@ class CallbacksWrapper(TrainingCallback):
     def on_training_start(self, net: StateSpaceNN):
         if len(self.callbacks) == 0:
             return
-        
+
         for cbk in self.callbacks:
             cbk.on_training_start(net)
 
     def on_epoch_start(self, net: StateSpaceNN, epoch: int):
         if len(self.callbacks) == 0:
             return
-        
+
         for cbk in self.callbacks:
             cbk.on_epoch_start(net, epoch)
 
     def on_epoch_end(self, data: PostEpochTrainingData, net: StateSpaceNN) -> bool:
         if len(self.callbacks) == 0:
             return False
-        
-        cbk_results = [ cbk.on_epoch_end(data, net) for cbk in self.callbacks ]
+
+        cbk_results = [cbk.on_epoch_end(data, net) for cbk in self.callbacks]
         if any(cbk_results):
             fired_callback = self.callbacks[[i for i, j in enumerate(cbk_results) if j][0]]
             print(f'\n{fired_callback.__class__.__name__} requested to orderly stop the training procedure.')
@@ -145,7 +147,7 @@ class CallbacksWrapper(TrainingCallback):
     def on_training_end(self, data: TrainingCallback, net: StateSpaceNN) -> dict:
         if len(self.callbacks) == 0:
             return
-        
+
         outputs = {}
         for cbk in self.callbacks:
             out = cbk.on_training_end(data, net)
@@ -163,7 +165,7 @@ class LoggingCallback(TrainingCallback):
 
     def __init__(self) -> None:
         """
-        Callback which logs the relevant informations during training
+        Callback which logs the relevant information during training
 
         Parameters
         ----------
@@ -196,7 +198,7 @@ class LoggingCallback(TrainingCallback):
 
     def _list2dict(self, x: List):
         keys = [str(k) for k, j in enumerate(x)]
-        return dict(zip(keys, x))
+        return dict(zip(keys, x, strict=True))
 
     def on_epoch_start(self, net: StateSpaceNN, epoch: int):
         self.timer.start()
@@ -216,26 +218,30 @@ class LoggingCallback(TrainingCallback):
             self.tensorboard.add_scalar(tag='Metric/Validation', scalar_value=data.val_metric, global_step=data.epoch)
             self.tensorboard.add_scalar(tag='Metric/Training', scalar_value=data.train_metric, global_step=data.epoch)
             self.tensorboard.add_scalar(tag='Training Loss', scalar_value=data.train_loss, global_step=data.epoch)
-            self.tensorboard.add_scalars(main_tag='Residuals/ISS', tag_scalar_dict=self._list2dict(data.iss_residuals), global_step=data.epoch)
-            self.tensorboard.add_scalars(main_tag='Residuals/deltaISS', tag_scalar_dict=self._list2dict(data.deltaiss_residuals), global_step=data.epoch)
+            self.tensorboard.add_scalars(main_tag='Residuals/ISS', tag_scalar_dict=self._list2dict(data.iss_residuals),
+                                         global_step=data.epoch)
+            self.tensorboard.add_scalars(main_tag='Residuals/deltaISS',
+                                         tag_scalar_dict=self._list2dict(data.deltaiss_residuals),
+                                         global_step=data.epoch)
 
         return False
 
     def on_training_end(self, data: PostEpochTrainingData, net: StateSpaceNN) -> dict:
         if self.matfile is not None:
             self.matfile.push(training_log=self.log)
-        
+
         with torch.no_grad():
             iss_residuals = [nu.detach().item() for nu in net.iss_residuals()]
             deltaiss_residuals = [nu.detach().item() for nu in net.deltaiss_residuals()]
             is_iss = all([nu < 0 for nu in iss_residuals])
             is_deltaiss = all([nu < 0 for nu in deltaiss_residuals])
-        
+
         return {'final_train_metric': self.log['train_metric'][-1], 'final_val_metric': self.log['val_metric'][-1],
                 'final_iss_residuals': iss_residuals, 'final_deltaiss_residuals': deltaiss_residuals,
                 'is_iss': is_iss, 'is_deltaiss': is_deltaiss,
-                'avg_epoch_time': sum(self.log['epoch_time']) / float(len(self.log['epoch_time'])), 
+                'avg_epoch_time': sum(self.log['epoch_time']) / float(len(self.log['epoch_time'])),
                 'training_epochs': data.epoch}
+
 
 class SigIntCallback(TrainingCallback):
 
@@ -253,7 +259,7 @@ class SigIntCallback(TrainingCallback):
 
     def sigint_receiver(self, sig, frame):
         self._sigint = True
-    
+
     def on_epoch_end(self, data: PostEpochTrainingData, net: StateSpaceNN) -> bool:
         """
         Returns True if the stopping condition is met
@@ -282,7 +288,7 @@ class EarlyStoppingCallback(TrainingCallback):
         """
         super().__init__()
         self.patience = patience
-        self.watch_from = watch_from 
+        self.watch_from = watch_from
         self.save_best = save_best
 
         #  Best global performances are evaluated without considering the stability conditions
@@ -297,9 +303,9 @@ class EarlyStoppingCallback(TrainingCallback):
     @property
     def best_epoch(self):
         return self._best_stable_epoch
-    
+
     @property
-    def best_metric(self): 
+    def best_metric(self):
         return self._best_stable_metric
 
     def on_training_start(self, net: StateSpaceNN):
@@ -326,7 +332,7 @@ class EarlyStoppingCallback(TrainingCallback):
             self._best_stable_metric = data.val_metric
             self._best_stable_epoch = data.epoch
             self._best_stable_weights = copy.deepcopy(net.state_dict())
-        
+
         # Logging
         self.log['overall_best_epoch'].append(self._overall_best_epoch if self._overall_best_epoch else -inf)
         self.log['overall_best_metric'].append(self._overall_best_metric)
@@ -339,20 +345,24 @@ class EarlyStoppingCallback(TrainingCallback):
             del self.log['best_stable_metric']
 
         if self.tensorboard is not None:
-            self.tensorboard.add_scalar(tag='Best/Overall-Epoch', scalar_value=self._overall_best_epoch, global_step=data.epoch)
-            self.tensorboard.add_scalar(tag='Best/Overall-Metric', scalar_value=self._overall_best_metric, global_step=data.epoch)
+            self.tensorboard.add_scalar(tag='Best/Overall-Epoch', scalar_value=self._overall_best_epoch,
+                                        global_step=data.epoch)
+            self.tensorboard.add_scalar(tag='Best/Overall-Metric', scalar_value=self._overall_best_metric,
+                                        global_step=data.epoch)
             if data.enforce_iss or data.enforce_deltaiss and self.best_epoch:
-                self.tensorboard.add_scalar(tag='Best/Stable-Epoch', scalar_value=self.best_epoch, global_step=data.epoch)
-                self.tensorboard.add_scalar(tag='Best/Stable-Metric', scalar_value=self.best_metric, global_step=data.epoch)
-        
+                self.tensorboard.add_scalar(tag='Best/Stable-Epoch', scalar_value=self.best_epoch,
+                                            global_step=data.epoch)
+                self.tensorboard.add_scalar(tag='Best/Stable-Metric', scalar_value=self.best_metric,
+                                            global_step=data.epoch)
+
         # Patience is evaluated considering the overall best epoch (not necessarily a stable epoch)
         self.es_fired = data.epoch >= self._overall_best_epoch + self.patience \
-                            and self._best_stable_epoch \
-                            and self._best_stable_epoch >= self.watch_from
+                        and self._best_stable_epoch \
+                        and self._best_stable_epoch >= self.watch_from
         return self.es_fired
 
     def on_training_end(self, data: PostEpochTrainingData, net: StateSpaceNN) -> dict:
-        output = {'early_stopping_fired': self.es_fired, 'overall_best_epoch': self._overall_best_epoch, 
+        output = {'early_stopping_fired': self.es_fired, 'overall_best_epoch': self._overall_best_epoch,
                   'overall_best_metric': self._overall_best_metric}
 
         if self._best_stable_weights:
@@ -365,6 +375,7 @@ class EarlyStoppingCallback(TrainingCallback):
 
         self.es_fired = False
         return output
+
 
 class TargetMetricCallback(TrainingCallback):
     def __init__(self, target: float) -> None:
@@ -385,8 +396,8 @@ class TargetMetricCallback(TrainingCallback):
         Returns True if the stopping criterion is met.
         """
         self.target_fired = data.val_metric <= self.target and \
-                                (data.enforce_iss and all([r < 0.0 for r in data.iss_residuals]) or
-                                data.enforce_deltaiss and all([r < 0.0 for r in data.deltaiss_residuals]))
+                            (data.enforce_iss and all([r < 0.0 for r in data.iss_residuals]) or
+                             data.enforce_deltaiss and all([r < 0.0 for r in data.deltaiss_residuals]))
         return self.target_fired
 
     def on_training_end(self, data: PostEpochTrainingData, net: StateSpaceNN) -> dict:
@@ -394,8 +405,10 @@ class TargetMetricCallback(TrainingCallback):
         self.target_fired = False
         return output
 
+
 class PerformanceTestingCallback(TrainingCallback):
-    def __init__(self, test_loader: DataLoader, plot_fequency: int = None, dpi: float = 200, figsize: Tuple[float, float] = (5, 3)) -> None:
+    def __init__(self, test_loader: DataLoader, plot_frequency: int = None, dpi: float = 200,
+                 figsize: Tuple[float, float] = (5, 3), plot_denormalized: bool = True) -> None:
         """
         Test the performances of the model on an independent test set.
 
@@ -403,9 +416,9 @@ class PerformanceTestingCallback(TrainingCallback):
         ----------
         test_loader : DataLoader
             The DataLoader of the independent test set.
-        plot_fequency : int, optional
+        plot_frequency : int, optional
             Frequency with which the performances should be plotted during training.
-            By default None, meaning that performances are not tested during training.
+            By default, None, meaning that performances are not tested during training.
         dpi : float, optional
             DPIs of the figure, by default 175
         figsize : Tuple[float, float], optional
@@ -413,9 +426,10 @@ class PerformanceTestingCallback(TrainingCallback):
         """
         super().__init__()
         self.test_loader = test_loader
-        self.plot_frequency = plot_fequency
+        self.plot_frequency = plot_frequency
         self.figsize = figsize
         self.dpi = dpi
+        self.plot_denormalized = plot_denormalized
 
     def _predict(self, net: StateSpaceNN):
         """
@@ -443,7 +457,7 @@ class PerformanceTestingCallback(TrainingCallback):
         scaled_figsize = (self.figsize[0] * n_out, self.figsize[1] * n_seq)
         fig, axs = plt.subplots(nrows=n_seq, ncols=n_out, figsize=scaled_figsize, dpi=self.dpi, squeeze=False)
 
-        y_hat_np = y_hat.detach().numpy()        
+        y_hat_np = y_hat.detach().numpy()
         y_test_np = y_test.detach().numpy()
 
         for j in range(0, n_seq):
@@ -469,8 +483,11 @@ class PerformanceTestingCallback(TrainingCallback):
         if self.tensorboard is not None:
             self.tensorboard.add_scalar('Metric/Test', scalar_value=test_metric, global_step=data.epoch)
             self.tensorboard.add_scalar('Metric/FIT', scalar_value=fit_index, global_step=data.epoch)
-            
+
             if self.plot_frequency and self.plot_frequency > 0 and data.epoch % self.plot_frequency == 0:
+                if self.plot_denormalized:
+                    y_hat = net.output_scaler.denormalize(y_hat)
+                    y_test = net.output_scaler.denormalize(y_test)
                 self.tensorboard.add_figure(tag='Test', figure=self._plot_test(data, y_hat, y_test),
                                             global_step=data.epoch, close=True)
 
@@ -485,11 +502,17 @@ class PerformanceTestingCallback(TrainingCallback):
 
         fit_index = self._compute_FIT(y_hat, y_test)
 
+        if self.plot_denormalized:
+            u_test = net.input_scaler.denormalize(u_test)
+            y_hat = net.output_scaler.denormalize(y_hat)
+            y_test = net.output_scaler.denormalize(y_test)
+
+        test_figure = self._plot_test(data, y_hat, y_test)
+
         if self.tensorboard is not None:
             self.tensorboard.add_scalar('Metric/Test', scalar_value=test_metric, global_step=data.epoch)
             self.tensorboard.add_scalar('Metric/FIT', scalar_value=fit_index, global_step=data.epoch)
-            self.tensorboard.add_figure(tag='Test', figure=self._plot_test(data, y_hat, y_test), 
-                                        global_step=data.epoch, close=True)
+            self.tensorboard.add_figure(tag='Test', figure=test_figure, global_step=data.epoch, close=True)
 
         if self.matfile:
             test_data = {'u_test_gt': u_test.clone().detach().numpy(),
@@ -500,11 +523,13 @@ class PerformanceTestingCallback(TrainingCallback):
             self.matfile.push(testing=test_data)
 
         return {'final_test_metric': test_metric, 'FIT': fit_index}
-        
+
+
 class MatlabExportCallback(TrainingCallback):
     """
     Save the trained network to a Matlab file
     """
+
     def __init__(self):
         super().__init__()
 

@@ -157,10 +157,10 @@ def tbptt(training: ExperimentData,
     Ts_train : int
         The length of each training subsequence.
     Ns_val : int, optional
-        The number of subsequences we want to extract for validaiton. 
+        The number of subsequences we want to extract for validation. 
         If -1, the validation sequences are not split in subsequences.
     Ts_val : int, optional
-        The length of each validaiton subsequence. 
+        The length of each validation subsequence. 
         If -1, the validation sequences are not split in subsequences.
     testing : ExperimentData, optional
         The testing experiments. List of (U, Y) tuples. Each element of the list is a single experiment.
@@ -218,7 +218,7 @@ def tbptt(training: ExperimentData,
                                            dtype=torch.long)
         sampled_initial_inst = torch.empty_like(sampled_experiments)
 
-        for e, n_e in zip(*sampled_experiments.unique(return_counts=True)):
+        for e, n_e in zip(*sampled_experiments.unique(return_counts=True), strict=True):
             initial_indexes = data.RandomSampler(torch.arange(0, T_range[e]), num_samples=n_e.item())
             initial_indexes = torch.tensor(list(initial_indexes), dtype=torch.long)
             sampled_initial_inst[sampled_experiments == e] = initial_indexes
@@ -292,11 +292,11 @@ def tbptt(training: ExperimentData,
     Y_val = torch.zeros(Nva, Tva, n_out)
 
     # TODO: Avoid the for loop?
-    for i, (exp, idx) in enumerate(zip(sampled_train_exp, sampled_train_idx)):
+    for i, (exp, idx) in enumerate(zip(sampled_train_exp, sampled_train_idx, strict=True)):
         U_train[i] = train_list[exp][0][idx:idx+Ttr]
         Y_train[i] = train_list[exp][1][idx:idx+Ttr]
 
-    for i, (exp, idx) in enumerate(zip(sampled_val_exp, sampled_val_idx)):
+    for i, (exp, idx) in enumerate(zip(sampled_val_exp, sampled_val_idx, strict=True)):
         U_val[i] = val_list[exp][0][idx:idx+Tva]
         Y_val[i] = val_list[exp][1][idx:idx+Tva]
 
@@ -306,7 +306,7 @@ def tbptt(training: ExperimentData,
         U_test = torch.zeros(Nte, Tte, n_in)
         Y_test = torch.zeros(Nte, Tte, n_out)
         
-        for i, (exp, idx) in enumerate(zip(sampled_test_exp, sampled_test_idx)):
+        for i, (exp, idx) in enumerate(zip(sampled_test_exp, sampled_test_idx, strict=True)):
             U_test[i] = test_list[exp][0][idx:idx+Tte]
             Y_test[i] = test_list[exp][1][idx:idx+Tte]
             
@@ -320,3 +320,4 @@ def tbptt(training: ExperimentData,
                                    validation=data.TensorDataset(U_val, Y_val),
                                    input_scaler=input_scaler,
                                    output_scaler=output_scaler)
+

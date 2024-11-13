@@ -1,0 +1,7 @@
+matplotlib
+numpy
+scipy
+sorcery
+torch
+tqdm
+ttictoc

@@ -24,27 +24,84 @@ import math
 import pydoc
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterable, List, Tuple
+from typing import TYPE_CHECKING, Callable, Iterable
 
 import numpy as np
 import torch
 import torch.nn as nn
 from scipy.io import savemat
 from sorcery import dict_of
-from torch.functional import Tensor
 from torch.nn.modules.container import ParameterList
 from torch.nn.parameter import Parameter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .callbacks import PostEpochTrainingData, TrainingCallback
-from .utils import MatFileWriter
+from ssnet.callbacks import PostEpochTrainingData, TrainingCallback
+from ssnet.utils import MatFileWriter
 
 if TYPE_CHECKING:
-    from .data import SequenceScaler
-    from .nn import StateSpaceNN, StateSpaceRecurrentLayer
+    from ssnet.data import SequenceScaler
 
-class StateSpaceNN(nn.Module):
+    # from ssnet.nn import StateSpaceNN, StateSpaceRecurrentLayer
+
+# pylint: disable=E0102
+class StateSpaceNN(nn.Module):  #noqa: F811
+    """Neural Network in State-Space form, as described in the following PhD dissertation
+
+        Fabio Bonassi, "Reconciling deep learning and control theory: recurrent neural networks for model-based control design."
+        Politecnico di Milano, 2023. 
+
+    Attributes
+    ----------
+    layers : nn.ModuleList
+        List containing the ordered layers of the neural network
+    cell_states : list[int]
+        List containing the number of states of each layer
+    batch_first : bool
+        If True, batches are on the 0-axis
+    optimizer : torch.optim.Optimizer
+        The optimizer used to train the network
+    state_size : int
+        Total number of states of the entire network
+    iss_residuals : list[torch.Tensor]
+        The list of ISS residuals of all the recurrent layers
+    deltaiss_residuals : list[torch.Tensor]
+        The list of δISS residuals of all the recurrent layers
+
+    Methods
+    -------
+    __init__ : 
+        Construct the StateSpaceNN object 
+    initial_states :
+        Generate random initial states for the StateSpaceNN
+    disable_training :
+        Make the StateSpaceNN untrainable (fixed)
+    get_configuration :
+        Returns the configuration dictionary of the StateSpaceNN model
+    from_configuration :
+        Factory function which builds a StateSpaceNN from a configuration dictionary
+    extra_repr :
+        Get a string representation of the State Space NN
+    export_to_matlab :
+        Export the StateSpaceNN to a Matlab file
+    save_model :
+        Save the StateSpaceNN to a checkpoint file
+    load_model :
+        Load a StateSpaceNN model from a checkpoint file
+    concatenate :
+        Concatenate several StateSpaceNN objects
+    forward :
+        Forward simulation of the StateSpaceNN
+    init_optimizer :
+        Setup the optimizer for training
+    fit :
+        Train the StateSpaceNN model
+
+    Context managers
+    ----------------
+    evaluating :
+        Temporarily switch the StateSpaceNN to evaluation mode
+    """
     __constants__ = ['batch_first', 'trainable']
     batch_fist: bool
     trainable: bool
@@ -65,15 +122,15 @@ class StateSpaceNN(nn.Module):
     _EXP_INPUT_SCALER: str = 'input_scaler'
     _EXP_OUTPUT_SCALER: str = 'output_scaler'
     
-    def __init__(self, layers: List[nn.Module] | nn.Module, batch_first: bool = False, trainable: bool = True, 
+    def __init__(self, layers: list[nn.Module] | nn.Module, batch_first: bool = False, trainable: bool = True, 
                  input_scaler: SequenceScaler = None, output_scaler: SequenceScaler = None):
         """
-        Neural Network in State-Space form
+        Construct the StateSpaceNN object from its layers and parameters
 
         Parameters
         ----------
-        layers : List[nn.Module] | nn.Module
-            List containing the ordered layers of the neural network
+        layers : list[nn.Module] | nn.Module
+            List containing the ordered layers of the StateSpaceNN
         batch_first: bool, optional
             Set to True if batches are on the 0-axis, by default False
         trainable: bool, optional
@@ -83,7 +140,7 @@ class StateSpaceNN(nn.Module):
         output_scaler: SequenceScaler, optional
             Scaler for the output data, by default None
         """
-        super(StateSpaceNN, self).__init__()
+        super().__init__()
         if not isinstance(layers, Iterable):
             layers = [layers]
 
@@ -107,14 +164,14 @@ class StateSpaceNN(nn.Module):
 
         Returns
         -------
-        int
+        n : int
             Number of states of the entire network
         """
         return sum(self.cell_states)
 
-    def initial_states(self, n_batches: int, stdv: float = 0.5) -> Tensor:
+    def initial_states(self, n_batches: int, stdv: float = 0.5) -> torch.Tensor:
         """
-        Generate random initial states for the SSNN
+        Generate random initial states for the StateSpaceNN
 
         Parameters
         ----------
@@ -125,11 +182,11 @@ class StateSpaceNN(nn.Module):
 
         Returns
         -------
-        Tensor
+        x0 : torch.Tensor
             Initial states
         """
-        return stdv * torch.randn(n_batches, self.state_size, requires_grad=False)
-
+        x0 = stdv * torch.randn(n_batches, self.state_size, requires_grad=False)
+        return x0
 
     @contextmanager
     def evaluating(self):
@@ -150,7 +207,7 @@ class StateSpaceNN(nn.Module):
         mrepr = f"states={self.state_size}"
         return mrepr
 
-    def disable_training(self):
+    def disable_training(self) -> None:
         """
         Make the StateSpaceNN untrainable by setting the requires_grad field of each parameter to False.
         """
@@ -165,7 +222,7 @@ class StateSpaceNN(nn.Module):
 
     def get_configuration(self, sanitize_callables: bool = True) -> dict:
         """
-        Returns the configuration of the StateSpaceNN model
+        Returns the configuration of the StateSpaceNN model as a dictionary
 
         Parameters
         ----------
@@ -174,8 +231,8 @@ class StateSpaceNN(nn.Module):
 
         Returns
         -------
-        dict
-            The configuration.
+        nn_config : dict
+            The configuration
         """
 
         def get_submodule_configuration(m: object) -> dict:
@@ -212,6 +269,7 @@ class StateSpaceNN(nn.Module):
         # Layer classes
         nn_config[StateSpaceNN._CFG_LAYER_CLASS] = tuple([class_to_string(cell) for cell in self.layers])
 
+        # Dump scalers, if any
         if self.input_scaler is not None:
             nn_config[StateSpaceNN._CFG_INPUT_SCALER_CLASS] = class_to_string(self.input_scaler)
             nn_config[StateSpaceNN._CFG_INPUT_SCALER_CONFIG] = get_submodule_configuration(self.input_scaler)
@@ -219,6 +277,7 @@ class StateSpaceNN(nn.Module):
             nn_config[StateSpaceNN._CFG_OUTPUT_SCALER_CLASS] = class_to_string(self.output_scaler)
             nn_config[StateSpaceNN._CFG_OUTPUT_SCALER_CONFIG] = get_submodule_configuration(self.output_scaler)
         
+        # Get the configuration of each sub-layer
         layers_configuration = []
         for cell in self.layers:
             cell_configuration = get_submodule_configuration(cell)
@@ -230,7 +289,7 @@ class StateSpaceNN(nn.Module):
     @staticmethod
     def from_configuration(configuration: dict) -> StateSpaceNN:
         """
-        Factory function which builds a StateSpaceNN from a configuration dictionary.
+        Factory function which builds a StateSpaceNN from a configuration dictionary
 
         Parameters
         ----------
@@ -239,12 +298,12 @@ class StateSpaceNN(nn.Module):
 
         Returns
         -------
-        StateSpaceNN
+        net : StateSpaceNN
             The built StateSpaceNN object
         """
         layers = []
 
-        for (layer_class, layer_config) in zip(configuration[StateSpaceNN._CFG_LAYER_CLASS], configuration[StateSpaceNN._CFG_LAYER_CONFIG]):
+        for (layer_class, layer_config) in zip(configuration[StateSpaceNN._CFG_LAYER_CLASS], configuration[StateSpaceNN._CFG_LAYER_CONFIG], strict=True):
             cls = pydoc.locate(layer_class)
             layers.append(cls(**layer_config))
 
@@ -256,11 +315,13 @@ class StateSpaceNN(nn.Module):
             output_scaler = pydoc.locate(configuration[StateSpaceNN._CFG_OUTPUT_SCALER_CLASS])(**configuration[StateSpaceNN._CFG_OUTPUT_SCALER_CONFIG])
 
         net_config = configuration[StateSpaceNN._CFG_CONFIG]
-        return StateSpaceNN(layers=layers, input_scaler=input_scaler, output_scaler=output_scaler, **net_config)
+        net = StateSpaceNN(layers=layers, input_scaler=input_scaler, output_scaler=output_scaler, **net_config)
 
-    def export_to_matlab(self, matfile: str | Path | MatFileWriter):
+        return net
+
+    def export_to_matlab(self, matfile: str | Path | MatFileWriter) -> None:
         """
-        Export the StateSpaceNN to a Matlab file.
+        Export the StateSpaceNN to a Matlab (.MAT) file.
 
         Parameters
         ----------
@@ -268,7 +329,7 @@ class StateSpaceNN(nn.Module):
             The String or Path to the Matlab file or a MatFileWriter object.
         """
 
-        def tensor_to_np(tensors: dict[Tensor]) -> dict[np.ndarray]:
+        def tensor_to_np(tensors: dict[torch.Tensor]) -> dict[np.ndarray]:
             """
             Auxiliary function which scans a dictionary of tensors and converts them to numpy arrays
             """
@@ -278,9 +339,9 @@ class StateSpaceNN(nn.Module):
                     nps[key] = value.clone().detach().numpy()
             return nps
 
+        # Export the configuration and weights of the StateSpaceNN (and of its layers)
         config = self.get_configuration(sanitize_callables=True)
         layerdata = []
-
         for i, layer in enumerate(self.layers):
             layerdata += [{
                 **config[StateSpaceNN._CFG_LAYER_CONFIG][i],
@@ -293,6 +354,7 @@ class StateSpaceNN(nn.Module):
                 StateSpaceNN._EXP_CONFIG: config[StateSpaceNN._CFG_CONFIG],
                 StateSpaceNN._EXP_LAYERS: layerdata}
 
+        # Export input and output scalers, if any
         if self.input_scaler:
             scaler_cfg = tensor_to_np(config[StateSpaceNN._CFG_INPUT_SCALER_CONFIG])
             input_scaler_cfg = {**scaler_cfg,
@@ -307,6 +369,7 @@ class StateSpaceNN(nn.Module):
                                 'shortclass': self.output_scaler.__class__.__name__ }
             data[StateSpaceNN._EXP_OUTPUT_SCALER] = output_scaler_cfg
 
+        # Check the type of the matfile argument and save the data accordingly
         if isinstance(matfile, (str, Path)):
             savemat(matfile, data, appendmat=True)
         elif isinstance(matfile, MatFileWriter):
@@ -314,9 +377,9 @@ class StateSpaceNN(nn.Module):
         else:
             raise ValueError('Unsuitable type for argument matfile')
 
-    def save_model(self, path: str | Path):
+    def save_model(self, path: str | Path) -> None:
         """
-        Save the StateSpaceNN to a file
+        Save the StateSpaceNN to a checkpoint file
 
         Parameters
         ----------
@@ -331,11 +394,10 @@ class StateSpaceNN(nn.Module):
                 StateSpaceNN._EXP_CONFIG: self.get_configuration(sanitize_callables=True)}
         torch.save(data, path)   
 
-
     @staticmethod
     def load_model(path: str | Path, disable_training: bool = True) -> StateSpaceNN:
         """
-        Load a (trained) StateSpaceNN model from data.
+        Factory function that loads a (trained) StateSpaceNN model from a checkpoint.
 
         Parameters
         ----------
@@ -346,7 +408,7 @@ class StateSpaceNN(nn.Module):
 
         Returns
         -------
-        StateSpaceNN
+        net : StateSpaceNN
             The loaded StateSpaceNN
         """
         data = torch.load(path)
@@ -365,16 +427,16 @@ class StateSpaceNN(nn.Module):
     @staticmethod
     def concatenate(nns: Iterable[StateSpaceNN]) -> StateSpaceNN:
         """
-        Concatenate several StateSpaceNN object
+        Factory function that concatenatess several StateSpaceNN objects
 
         Parameters
         ----------
         nns : Iterable[StateSpaceNN]
-            A Tuple (or List) of StateSpaceNN to join.
+            A tuple (or list) of StateSpaceNN to concatenate.
 
         Returns
         -------
-        StateSpaceNN
+        net : StateSpaceNN
            The StateSpaceNN with joint layers.
         """
         if not (all([nn.batch_first for nn in nns]) or all([not nn.batch_first for nn in nns])):
@@ -383,31 +445,32 @@ class StateSpaceNN(nn.Module):
         batch_first = nns[0].batch_first
         any_trainable = any([nn.trainable for nn in nns])
         layers = []
-        for nn in nns:
-            if not nn.trainable:
-                nn.disable_training()   # Make sure that untrainable layers have no gradient
-            layers = layers + list(nn.layers)
+        for subnn in nns:
+            if not subnn.trainable:
+                subnn.disable_training()   # Make sure that untrainable layers have no gradient
+            layers = layers + list(subnn.layers)
 
-        return StateSpaceNN(layers=layers, batch_first=batch_first, trainable=any_trainable)
+        net =  StateSpaceNN(layers=layers, batch_first=batch_first, trainable=any_trainable)
+        return net
 
-
-    def _recurrence(self, u: Tensor, x0: Tensor) -> Tuple[Tensor, Tensor]:
+    def _recurrence(self, u: torch.Tensor, x0: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Perform one step of recurrence. Compute the output y(k) and the state x(k+1) given the initial state x(k) and the input u(k).
+        Perform one step of recurrence. Compute the output y(k) and the state x(k+1) given the current state x(k) and the input u(k).
         This is an internal method. Use forward() instead.
 
         Parameters
         ----------
-        u : Tensor
+        u : torch.Tensor
             The input at the current time instant, i.e. u(k)
-        x0 : [type]
-            The initial state, i.e. x(k)
+        x0 : torch.Tensor
+            The current state, i.e. x(k)
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
-            y : The output y(k)
-            xp : The state x(k+1)
+        y : torch.Tensor
+            The output y(k)
+        xp : torch.Tensor
+            The state x(k+1)
         """
         ui = u
         x0 = torch.split(x0, self.cell_states, dim=1)
@@ -419,42 +482,47 @@ class StateSpaceNN(nn.Module):
             else:
                 ui = cell(ui)
                 xt[i] = torch.zeros_like(x0[i])
-        # Debug here
 
+        y = ui
         xp = torch.cat(xt, dim=1)
-        return ui, xp
+        return y, xp
 
-    def forward(self, u: Tensor, x0: Tensor = None, auto_normalization: bool = False) -> Tuple[Tensor, Tensor]:
+    def forward(self, u: torch.Tensor, x0: torch.Tensor = None, auto_normalization: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward simulation of the State Space Neural Network
+        Forward simulation (in time) of the StateSpaceNN
 
         Parameters
         ----------
-        u : Tensor
+        u : torch.Tensor
             Batch of input sequences with shape `(Time, batches, inputs)`
-        x0 : Tensor, optional
+        x0 : torch.Tensor, optional
             Initial states with shape `(batches, states)`, by default None
         auto_normalization : bool, optional
             If True, the input and output are normalized before the forward pass (using `input_scaler` and `output_scaler`), by default False
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
-            y_seq : output sequence with shape `(Time, batches, outputs)`
-            x_seq : state sequence with shape `(Time, batches, states)`
+        y_seq : torch.Tensor
+            Output sequence with shape `(Time, batches, outputs)`
+        x_seq : torch.Tensor
+            State sequence with shape `(Time, batches, states)`
         """
         
         un = u.transpose(0, 1) if self.batch_first else u
 
+        # Normalize the input, if necessary
         if auto_normalization and self.input_scaler:
             un = self.input_scaler.normalize(un)
 
+        # If no initial state is passed, extract a random one
         if x0 is None:
             x0 = self.initial_states(un.shape[-2])
+
         output = []
         state = []
 
-        for t, ut in enumerate(un):
+        # Perform forward pass sequentially in time
+        for ut in un:
             y, x0 = self._recurrence(ut, x0)
             state.append(x0)
             output.append(y)
@@ -466,26 +534,27 @@ class StateSpaceNN(nn.Module):
             x_seq = x_seq.transpose(0, 1)
             y_seq = y_seq.transpose(0, 1)
 
+        # Denormalize the output, if necessary
         if auto_normalization and self.output_scaler:
             y_seq = self.output_scaler.denormalize(y_seq)
 
         return y_seq, x_seq
 
-    def iss_residuals(self) -> List[Tensor]:
+    def iss_residuals(self) -> list[torch.Tensor]:
         """
         Return the ISS residuals of all the layers of the network
 
         Returns
         -------
-        List[Tensor]
-            residuals: the ISS residuals of all the recurrent layers
+        residuals : list[torch.Tensor]
+            The ISS residuals of all the recurrent layers
         """
         residuals = []
 
         for cell in self.layers:
             if isinstance(cell, StateSpaceRecurrentLayer):
                 res = cell.iss_residuals()
-                if isinstance(res, Tuple):
+                if isinstance(res, tuple):
                     residuals += list(res)
                 elif isinstance(res, torch.Tensor):
                     residuals += [res]
@@ -494,21 +563,21 @@ class StateSpaceNN(nn.Module):
 
         return residuals
 
-    def deltaiss_residuals(self) -> List[Tensor]:
+    def deltaiss_residuals(self) -> list[torch.Tensor]:
         """
-        Compute the residual of the {\delta}ISS constraint
+        Compute the residual of the δISS constraint
 
         Returns
         -------
-        List[Tensor]
-            residuals: the residual of the {\delta}ISS constraint
+        residuals : list[torch.Tensor]
+            The residual of the δISS constraint
         """
         residuals = []
 
         for cell in self.layers:
             if isinstance(cell, StateSpaceRecurrentLayer):
                 res = cell.deltaiss_residuals()
-                if isinstance(res, Tuple):
+                if isinstance(res, tuple):
                     residuals += list(res)
                 elif isinstance(res, torch.Tensor):
                     residuals += [res]
@@ -518,7 +587,7 @@ class StateSpaceNN(nn.Module):
         return residuals
 
 
-    def init_optimizer(self, optimizer_init: Callable, lr: float = 1e-3, **opt_params):
+    def init_optimizer(self, optimizer_init: Callable, lr: float = 1e-3, **opt_params) -> None:
         """
         Setup the optimization algorithm
 
@@ -530,32 +599,55 @@ class StateSpaceNN(nn.Module):
             Learning rate, by default 1e-3
         opt_params : dict, optional
            Parameters of the optimization algorithm, by default {}
-
-        Returns
-        ----------
-        dict
-            The callbacks logs
         """
         self.optimizer = optimizer_init(self.parameters(), lr=lr, **opt_params)
 
-    def fit(
-        self,
-        criterion: torch.nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        val_metric: torch.nn.Module | Callable,
-        iss_regularizer: Callable = None,
-        deltaiss_regularizer: Callable = None,
-        epochs: int = 1e4,
-        washout: int = 0,
-        callbacks: TrainingCallback = None) -> dict:
+    def fit(self,
+            criterion: torch.nn.Module,
+            train_loader: DataLoader,
+            val_loader: DataLoader,
+            val_metric: torch.nn.Module | Callable,
+            iss_regularizer: Callable = None,
+            deltaiss_regularizer: Callable = None,
+            epochs: int = 1e4,
+            washout: int = 0,
+            callbacks: TrainingCallback = None) -> dict:
+        """
+        Train the StateSpaceNN model fitting it to the training dataset
+
+        Parameters
+        ----------
+        criterion : torch.nn.Module
+            Loss function
+        train_loader : DataLoader
+            Training dataset
+        val_loader : DataLoader
+            Validation dataset
+        val_metric : torch.nn.Module | Callable
+            Metric function for computing the performance score on the validation dataset
+        iss_regularizer : Callable, optional
+            Regularizer for the ISS constraint, by default None
+        deltaiss_regularizer : Callable, optional
+            Regularizer for the δISS constraint, by default None
+        epochs : int, optional
+            Number of epochs, by default 10'000
+        washout : int, optional
+            Number of washout steps, by default 0
+        callbacks : TrainingCallback, optional
+            Callbacks to be called during training, by default None
+        
+        Returns
+        -------
+        callback_logs : dict
+            Dictionary containing the logs of the callbacks
+        """
 
         if self.optimizer is None:
             raise ValueError("An optimizer must be specified before training the network.")
         if not self.trainable:
             raise ValueError('Cannot train a NN for which training has been disabled.')
 
-        # Extend the callbacks with gain-scheduling strategies on the loss function/regularizers
+        # TODO: Extend the callbacks with gain-scheduling strategies on the loss function/regularizers
         _callbacks = callbacks
         if isinstance(criterion, TrainingCallback):
             _callbacks.append(criterion)
@@ -564,34 +656,47 @@ class StateSpaceNN(nn.Module):
         if isinstance(deltaiss_regularizer, TrainingCallback):
             _callbacks.append(deltaiss_regularizer)
 
+        # Initialize the loss function
         loss = torch.tensor(np.inf, dtype=torch.float)
 
+        # Turn the network to train mode
+        # TODO: Check if this function behaves as expected!
         self.train()
+
+        # Call the `on_training_start` method of the callbacks
         _callbacks.on_training_start(self)
+
+        # Progress bar for training
         train_msg = tqdm(range(1, epochs + 1), desc="Training")
 
+        # Training loop
         for epoch in train_msg:
-            train_loss_avg = 0.0
-            train_metric_avg = 0.0
+            train_loss_avg = 0.0    # Average loss on the training dataset
+            train_metric_avg = 0.0  # Average metric on the training dataset
 
+            # Call the `on_epoch_start` method of the callbacks
             _callbacks.on_epoch_start(self, epoch=epoch)
 
+            # Loop over training batches
             for batch in train_loader:
-                u_batch, y_batch = batch
+                u_batch, y_batch = batch    # Extract the input and output sequences from the training batches
 
-                self.optimizer.zero_grad()
-                y_hat, _ = self(u_batch)
+                self.optimizer.zero_grad()  # Reset the gradients
+                y_hat, _ = self(u_batch)    # Open-loop simulation of the network (forward pass)
 
-                loss = criterion(y_hat[:, washout:, :], y_batch[:, washout:, :])
+                loss = criterion(y_hat[:, washout:, :], y_batch[:, washout:, :])    # Compute the loss
 
+                # Add the stability regularization, if any
                 if iss_regularizer is not None:
                     loss = loss + iss_regularizer(self.iss_residuals()) / self.n_dyn_layers
                 if deltaiss_regularizer is not None:
                     loss = loss + deltaiss_regularizer(self.deltaiss_residuals()) / self.n_dyn_layers
 
+                # Backward pass
                 loss.backward()
                 self.optimizer.step()
 
+                # Compute the performance metrics on the training set (for logging purposes)
                 with torch.no_grad() and self.evaluating():
                     metric = val_metric(y_hat[:, washout:, :], y_batch[:, washout:, :])
                     train_metric_avg += metric.detach().item() / len(train_loader)
@@ -599,23 +704,24 @@ class StateSpaceNN(nn.Module):
                 # Save the loss for logging purposes
                 train_loss_avg += loss.detach().item() / len(train_loader)
 
-            # Validation
+            # Validation loop
             with torch.no_grad() and self.evaluating():
                 iss_residuals = [nu.detach().item() for nu in self.iss_residuals()]
                 deltaiss_residuals = [nu.detach().item() for nu in self.deltaiss_residuals()]
                 val_metric_avg = 0.0
 
                 for batch in val_loader:
-                    u_batch, y_batch = batch
+                    u_batch, y_batch = batch    # Extract the input and output sequences from the validation batches
 
-                    self.optimizer.zero_grad()
-                    y_hat, _ = self(u_batch)
+                    self.optimizer.zero_grad()  # Reset the gradients
+                    y_hat, _ = self(u_batch)    # Open-loop simulation of the network (forward pass)
 
-                    metric = val_metric(y_hat[:, washout:, :], y_batch[:, washout:, :])
+                    metric = val_metric(y_hat[:, washout:, :], y_batch[:, washout:, :])  # Compute the validation performance metrics
 
-                    # Save the loss for logging purposes
+                    # Save the average validation metrics for logging purposes
                     val_metric_avg += metric.detach().item() / len(val_loader)
 
+            # Pack the data related to the training epoch and call the `on_epoch_end` method of the callbacks
             epoch_data = PostEpochTrainingData(
                 epoch=epoch,
                 train_loss=train_loss_avg,
@@ -630,10 +736,11 @@ class StateSpaceNN(nn.Module):
             )
 
             if _callbacks.on_epoch_end(epoch_data, self):
-                print(f"Training procedure stopped.")
+                # If the callback returns True, stop the training
+                print("Training procedure stopped.")
                 break
 
-        # Call the on_training_end of the callbacks
+        # Call the `on_training_end` method of the callbacks
         callback_logs = _callbacks.on_training_end(epoch_data, self)
 
         # Turn the network to eval mode
@@ -642,18 +749,60 @@ class StateSpaceNN(nn.Module):
         return callback_logs
 
 
-class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
+class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):  #noqa<F811>
+    """
+    Abstract class for recurrent layers of the StateSpaceNN
+
+    Attributes
+    ----------
+    name : str
+        Name of the layer
+    trainable : bool
+        Flag indicating if the layer can be trained or not
+    state_size : int
+        Number of states of the layer
+    units : int
+        Number of units of the layer
+
+    Methods
+    -------
+    initial_states :
+        Generate random initial states for the layer
+    reset_parameters :
+        Reset NN parameters
+    
+    Abstract methods
+    ----------------
+    forward :
+        Forward step of the layer
+    iss_residuals :
+        Return the ISS residuals of the layer
+    deltaiss_residuals :
+        Compute the residual of the δISS constraint
+    """
+
     units: int
     __constants__ = []
 
+    def __init__(self,
+                name: str = "RecurrentLayer",
+                init_input: Callable = None,
+                init_kernel: Callable = None,
+                init_bias: Callable = None):
+        """
+        Construct a StateSpaceRecurrentLayer
 
-    def __init__(
-        self,
-        name: str = "RecurrentLayer",
-        init_input: Callable = None,
-        init_kernel: Callable = None,
-        init_bias: Callable = None):
-
+        Parameters
+        ----------
+        name : str, optional
+            Name of the layer, by default "RecurrentLayer"
+        init_input : Callable, optional
+            Initializer for the input weights, leave None for default
+        init_kernel : Callable, optional
+            Initializer for the recurrent weights, leave None for default
+        init_bias : Callable, optional
+            Initializer for the bias, leave None for default
+        """
         super(StateSpaceRecurrentLayer, self).__init__()
         self.name = name
 
@@ -661,7 +810,7 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
         self.init_kernel_ = init_kernel
         self.init_bias_ = init_bias
 
-    def _check_init_inplace(self, initializer):
+    def _check_init_inplace(self, initializer) -> None:
         """
         Assess that the initializer are in-place operation
 
@@ -681,7 +830,7 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
         if np.equal(test_random, test_tensor.detach()):
             raise ValueError("Initializers must be in-place operations!")
 
-    def check_init_fcns(self):
+    def _check_init_fcns(self):
         """
         Overwrite None initializers with defaults (`uniform_` for kernel ad inputs, `zeros_` for biases)
         """
@@ -705,26 +854,29 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
         Reset NN parameters
         """
         # Check if any initializer is None, and if necessary set it to its default.
-        self.check_init_fcns()
+        self._check_init_fcns()
 
+        # Initialize each weight matrix
         for wname, weight in self.named_parameters():
-            ngates = max(weight.shape[-1] // self.units, 1)
+            ngates = max(weight.shape[-1] // self.units, 1)     # Number of gates of the recurrent layer
 
             # In general initialization must be performed separately for each weight matrix
             chunked_weights = torch.chunk(weight, chunks=ngates, dim=-1)
-            if wname.startswith("W"):
+            if wname.startswith("W"):   # Input weights
                 init_fcn = self.init_input_
-            elif wname.startswith("U"):
+            elif wname.startswith("U"):     # State/kernel weights
                 init_fcn = self.init_kernel_
-            elif wname.startswith("b"):
+            elif wname.startswith("b"):     # Biases
                 init_fcn = self.init_bias_
             else:
+                # TODO This case may be handled better by resorting to a default 
                 raise ValueError("Weight not recognized")
 
             for w in chunked_weights:
+                # Initialize every weight matrix
                 init_fcn(w)
 
-    def initial_states(self, n_batches: int, stdv: float = 0.5) -> Tensor:
+    def initial_states(self, n_batches: int, stdv: float = 0.5) -> torch.Tensor:
         """
         Generate random initial states for the StateSpaceRecurrentLayer
 
@@ -737,22 +889,23 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
 
         Returns
         -------
-        Tensor
+        x0 : torch.Tensor
             Initial states
         """
-        return stdv * torch.randn(n_batches, self.state_size, requires_grad=False)
+        x0 = stdv * torch.randn(n_batches, self.state_size, requires_grad=False)
+        return x0
 
-    def _gate_bounds(self, W: Tensor, U: Tensor, b: Tensor, activation: Callable, p: int = np.inf) -> Tuple[Tensor, Tensor, Tensor]:
+    def _gate_bounds(self, W: torch.Tensor, U: torch.Tensor, b: torch.Tensor, activation: Callable, p: int = np.inf) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Compute the matrices norms and the bound of a gate.
 
         Parameters
         ----------
-        W : Tensor
+        W : torch.Tensor
             The W matrix of the gate, with shape `(states, inputs)`
-        U : Tensor
+        U : torch.Tensor
             The U matrix of the gate, with shape `(states, states)`
-        b : Tensor
+        b : torch.Tensor
             The bias of the gate, with shape `(states, 1)`
         activation : Callable
             The activation function of the gate
@@ -761,18 +914,22 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
 
         Returns
         -------
-        Tuple[Tensor, Tensor, Tensor]
-            sigma : The bound of the gate
-            W_norm : The p-norm of W
-            U_norm : The p-norm of U
+        sigma : torch.Tensor
+            The upper bound of the gate
+        W_norm : torch.Tensor 
+            The p-norm of W
+        U_norm : torch.Tensor
+            The p-norm of U
         """
         if W.shape[0] != U.shape[0]:
             raise ValueError("The weight matrices W and U were not transposed")
         if b.ndim == 1:
             b = b.unsqueeze(1)
 
+        # Comput the upper bound of the gate
         sigarg = torch.cat([W, U, b], dim=1)
         sigarg = torch.linalg.norm(sigarg, ord=np.inf)
+
         return (
             activation(sigarg),
             torch.linalg.norm(W, ord=p),
@@ -798,6 +955,33 @@ class StateSpaceRecurrentLayer(nn.Module, metaclass=abc.ABCMeta):
 
 
 class StateSpaceVanillaRNN(StateSpaceRecurrentLayer):
+    """ Vanilla RNN implementation in State-Space form
+
+    Attributes
+    ----------
+    units : int
+        Number of neurons of the vanilla RNN
+    in_features : int
+        Number of inputs
+    io_delay : bool
+        If True, the state at the previous time instant is returned, otherwise the current state is returned
+    state_activation : Callable | str
+        The activation function of the state-update law
+    trainable : bool
+        Flag indicating if the layer can be trained or not
+    origin_equilibrium : bool
+        Flag indicating if the origin (u=0) is an equilibrium of the system
+    
+    Methods
+    -------
+    forward :
+        Forward step of the layer
+    iss_residuals :
+        Return the ISS residuals of the layer
+    deltaiss_residuals :
+        Compute the residual of the δISS constraint
+    """
+
     __constants__ = ['units', 'in_features', 'io_delay', 'state_activation', 'trainable',
                      'origin_equilibrium', 'name']
     units: int
@@ -808,19 +992,17 @@ class StateSpaceVanillaRNN(StateSpaceRecurrentLayer):
     origin_equilibrium: bool
     name: str
 
-    def __init__(
-        self,
-        units: int,
-        in_features: int,
-        io_delay: bool = True,
-        state_activation=torch.tanh,
-        trainable: bool = True,
-        origin_equilibrium: bool = False,
-        init_input: Callable = None,
-        init_kernel: Callable = None,
-        init_bias: Callable = None,
-        name: str = "RNN",
-    ):
+    def __init__(self,
+                 units: int,
+                 in_features: int,
+                 io_delay: bool = True,
+                 state_activation=torch.tanh,
+                 trainable: bool = True,
+                 origin_equilibrium: bool = False,
+                 init_input: Callable = None,
+                 init_kernel: Callable = None,
+                 init_bias: Callable = None,
+                 name: str = "RNN"):
         """
         StateSpaceVanillaRNN: a vanilla RNN implementation in State-Space form
 
@@ -831,7 +1013,7 @@ class StateSpaceVanillaRNN(StateSpaceRecurrentLayer):
         in_features : int
             Number of inputs
         io_delay : bool, optional
-            Return the state at the previous time instant, by default True
+            If True the state x(k) is returned, otherwise the state x(k+1) is returned
         state_activation : Callable, optional
             The activation function of the state-update law, by `default F.tanh`
         trainable : bool, optional
@@ -856,12 +1038,12 @@ class StateSpaceVanillaRNN(StateSpaceRecurrentLayer):
         self.trainable = trainable
         self.origin_equilibrium = origin_equilibrium
 
-        # Register parameters
+        # Register the parameters of the layer
         self.W = Parameter(torch.zeros(units, in_features), requires_grad=trainable)
         self.U = Parameter(torch.zeros(units, units), requires_grad=trainable)
         self.b = Parameter(torch.zeros(units), requires_grad=trainable and not origin_equilibrium)
 
-        # Initialize them
+        # Initialize the parameters
         self.reset_parameters()
 
         if origin_equilibrium:
@@ -869,25 +1051,96 @@ class StateSpaceVanillaRNN(StateSpaceRecurrentLayer):
 
     @property
     def state_size(self):
+        """State size of the layer
+
+        Returns
+        -------
+        n : int
+            The state size of the layer
+        """
         return self.units
 
-    def forward(self, u, x0=None):
-        if x0 is None:
-            x0 = self.initial_states(u.shape[-2])
+    def forward(self, u: torch.Tensor, xk: torch.Tensor = None):
+        """
+        Forward step of the layer
 
-        x = torch.matmul(u, self.W.t()) + torch.matmul(x0, self.U.t()) + self.b
+        Parameters
+        ----------
+        u : torch.Tensor
+            The input at the current time instant, i.e. u(k)
+        xk : torch.Tensor, optional
+            The current state, i.e. x(k)
+        
+        Returns
+        -------
+        y : torch.Tensor
+            The output y(k)
+        xp : torch.Tensor
+            The state x(k+1)
+        """
+
+        if xk is None:
+            xk = self.initial_states(u.shape[-2])
+
+        x = torch.matmul(u, self.W.t()) + torch.matmul(xk, self.U.t()) + self.b
         xp = self.state_activation(x)
-        y = x0 if self.io_delay else xp
+        y = xk if self.io_delay else xp
 
         return y, xp
 
     def iss_residuals(self):
+        """The ISS residuals are undefined for the vanilla RNN
+
+        Returns
+        -------
+        An empty list
+        """
         return []
 
     def deltaiss_residuals(self):
+        """The δISS residuals are undefined for the vanilla RNN
+
+        Returns
+        -------
+        An empty list
+        """
         return []
 
+
 class StateSpaceGRU(StateSpaceRecurrentLayer):
+    """ Implementations of Gated Recurrent Units in State-Space form, as described in the PhD Dissertation 
+    "Reconciling deep learning and control theory: recurrent neural networks for model-based control design"  (F. Bonassi, 2023), Chapter 3.3.
+
+    Attributes
+    ----------
+    units : int
+        Number of neurons of the GRU
+    in_features : int
+        Number of inputs
+    io_delay : bool
+        If True the state x(k) is returned, otherwise the state x(k+1) is returned
+    gate_activation : Callable | str
+        The activation function of the gate
+    input_activation : Callable | str
+        The input squashing function
+    trainable : bool
+        Flag indicating if the layer can be trained or not
+    minimal : bool
+        Flag indicating if the GRU is minimal (i.e. without forget gate)
+    origin_equilibrium : bool
+        Flag indicating if the origin (u=0) is an equilibrium of the system
+    forget_bias : bool
+        Flag indicating if a bias is added to the squashed input, multiplied to the forget gate
+    
+    Methods
+    -------
+    forward :
+        Forward step of the layer
+    iss_residuals :
+        Return the ISS residuals of the layer
+    deltaiss_residuals :
+        Compute the residual of the δISS constraint
+    """
 
     __constants__ = ['units', 'in_features', 'io_delay', 'gate_activation', 'input_activation',
                      'trainable', 'minimal', 'origin_equilibrium', 'forget_bias', 'name']
@@ -902,24 +1155,22 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
     forget_bias: bool
     name: str
 
-    def __init__(
-        self,
-        units: int,
-        in_features: int,
-        io_delay: bool = True,
-        gate_activation: Callable = torch.sigmoid,
-        input_activation: Callable = torch.tanh,
-        trainable: bool = True,
-        minimal: bool = False,
-        origin_equilibrium: bool = False,
-        forget_bias: bool = False,
-        init_input: Callable = None,
-        init_kernel: Callable = None,
-        init_bias: Callable = None,
-        name: str = "GRU",
-    ):
+    def __init__(self,
+                 units: int,
+                 in_features: int,
+                 io_delay: bool = True,
+                 gate_activation: Callable = torch.sigmoid,
+                 input_activation: Callable = torch.tanh,
+                 trainable: bool = True,
+                 minimal: bool = False,
+                 origin_equilibrium: bool = False,
+                 forget_bias: bool = False,
+                 init_input: Callable = None,
+                 init_kernel: Callable = None,
+                 init_bias: Callable = None,
+                 name: str = "GRU"):
         """
-        State Space Gated Recurrent Units
+        Construct a StateSpaceGRU
 
         Parameters
         ----------
@@ -953,7 +1204,7 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
         super(StateSpaceGRU, self).__init__(name, init_input=init_input, init_kernel=init_kernel, init_bias=init_bias)
         self.units = units
         self.in_features = in_features
-        self.io_delay = io_delay
+        self.io_delay =  io_delay
         self.gate_activation = getattr(torch, gate_activation) if isinstance(gate_activation, str) else gate_activation 
         self.input_activation = getattr(torch, input_activation) if isinstance(input_activation, str) else input_activation
         self.trainable = trainable
@@ -961,6 +1212,8 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
         self.origin_equilibrium = origin_equilibrium
         self.forget_bias = forget_bias
 
+        # The GRU has two gates if it is minimal, three if it is non-minimal
+        # Notice that the squashed input is counted as a gate, for consistency
         self._n_gates = 2 + int(not minimal)
 
         self.Wzf = Parameter(torch.zeros(in_features, (self._n_gates - 1) * units), requires_grad=trainable)
@@ -972,15 +1225,25 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
         self.bzf = Parameter(torch.zeros((self._n_gates - 1) * units), requires_grad=trainable)
         self.br = Parameter(torch.zeros(units), requires_grad=trainable and not origin_equilibrium)
 
+        # Include the forget bias, if the origin is not enforced to be an equilibrium
         if self.forget_bias and not self.origin_equilibrium:
             self.brx = Parameter(torch.zeros(units), requires_grad=trainable and not origin_equilibrium)
 
         self.reset_parameters()
 
         if origin_equilibrium:
-            torch.zero_(self.br)
+            torch.zero_(self.br)    # Set the bias to zero if the origin is an equilibrium
 
     def extra_repr(self) -> str:
+        """
+        Return a string representation of the GRU
+
+        Returns
+        -------
+        str
+            String representation of the GRU
+        """
+
         return (
             f"units={self.units}, minimal={self.minimal}, in_features={self.in_features}, io_delay={self.io_delay}, "
             f"origin_equilibrium={self.origin_equilibrium}, forget_bias={self.forget_bias}, gate_activation={self.gate_activation.__name__}, "
@@ -994,57 +1257,52 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
 
         Returns
         -------
-        int
+        n : int
             Number of states
         """
         return self.units
 
-    def forward(self, u: Tensor, x0: Tensor = None) -> Tuple[Tensor, Tensor]:
+    def forward(self, u: torch.Tensor, xk: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform the forward-pass of the GRU
 
         Parameters
         ----------
-        u : Tensor
+        u : torch.Tensor
             Input u(k) of the GRU layer, with shape `(batch_size, in_features)`
-        x0 : Tensor, optional
+        xk : torch.Tensor, optional
             Current state x(k) of the GRU, with shape `(batch_size, n_units)`, by default None
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
+        tuple[torch.Tensor, torch.Tensor]
             y : the output y(k), with shape `(batch_size, n_units)`
             xp : the new state x(k+1), with shape `(batch_size, n_units)`
         """
-        if x0 is None:
-            x0 = self.initial_states(u.shape[-2])
+        if xk is None:
+            xk = self.initial_states(u.shape[-2])
 
         if self.minimal:
             # In minimal GRUs f = 1
-            # (shape: (batch_size, n_units))
-            z = self.gate_activation(torch.matmul(u, self.Wzf) + torch.matmul(x0, self.Uzf) + self.bzf)
-            r = self.input_activation(torch.matmul(u, self.Wr) + torch.matmul(x0, self.Ur) + self.br)  # (shape: (batch_size, n_units))
+            z = self.gate_activation(torch.matmul(u, self.Wzf) + torch.matmul(xk, self.Uzf) + self.bzf)  # (shape: (batch_size, n_units))
+            r = self.input_activation(torch.matmul(u, self.Wr) + torch.matmul(xk, self.Ur) + self.br)   # (shape: (batch_size, n_units))
         else:
-            gates = self.gate_activation(torch.matmul(u, self.Wzf) + torch.matmul(x0, self.Uzf) + self.bzf)  # (shape: (batch_size, 2*n_units))
+            gates = self.gate_activation(torch.matmul(u, self.Wzf) + torch.matmul(xk, self.Uzf) + self.bzf)  # (shape: (batch_size, 2*n_units))
             
             z, f = torch.chunk(gates, 2, dim=1) # (shape: (batch_size, n_units))
-            if not self.forget_bias: # (shape: (batch_size, n_units))
-                r = self.input_activation(torch.matmul(u, self.Wr) + torch.matmul(f * x0, self.Ur) + self.br)
+            if not self.forget_bias: 
+                r = self.input_activation(torch.matmul(u, self.Wr) + torch.matmul(f * xk, self.Ur) + self.br)  # (shape: (batch_size, n_units))
             else:
-                r = self.input_activation(torch.matmul(u, self.Wr) + f * (torch.matmul(x0, self.Ur) + self.brx) + self.br)  # (shape: (batch_size, n_units))
+                r = self.input_activation(torch.matmul(u, self.Wr) + f * (torch.matmul(xk, self.Ur) + self.brx) + self.br)  # (shape: (batch_size, n_units))
 
         # GRU state update x(k+1) = f(x(k), u(k))
-        xp = z * x0 + (1 - z) * r  # (shape: (batch_size, n_units))
+        xp = z * xk + (1 - z) * r  # (shape: (batch_size, n_units))
         # If `io_delay` return x(k), else x(k+1)
-        y = x0 if self.io_delay else xp  # (shape: (batch_size, n_outputs))
-
+        y = xk if self.io_delay else xp  # (shape: (batch_size, n_outputs))
         return y, xp
 
-    def _get_norms(self, p: int = np.inf) -> Tuple[
-        Tuple[Tensor, Tensor, Tensor],
-        Tuple[Tensor, Tensor, Tensor],
-        Tuple[Tensor, Tensor, Tensor],
-    ]:
+
+    def _get_norms(self, p: int = np.inf) -> dict:
         """
         Retrieve the gates' bounds and the weights' norms of the GRU layer.
 
@@ -1055,54 +1313,48 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
 
         Returns
         -------
-        Dict
-            (phi_r, sigma_z, sigma_f) : The bounds of the gates
-            (Wr_norm, Wz_norm, Wf_norm) : The norms of the W matrices
-            (Ur_norm, Uz_norm, Uf_norm) : The norms of the U matrices
+        dict
+            Dictionary containing the gates' bounds and the weights' norms.
         """
+
         Wr = self.Wr.t()  # (shape: (n_units, in_features))
         Ur = self.Ur.t()  # (shape: (n_units, n_units))
         br = self.br  # (shape: (n_units, 1))
 
         if self.minimal:
+            # If the GRU is minimal, the forget gate is not present
+            # We therefore set the bounds consistently
             Wz = self.Wzf.t()
             Uz = self.Uzf.t()
             Wf_norm = 0.0
             Uf_norm = 0.0
             sigma_f = 1.0
         else:
-            # (shape: (n_units, in_features))
-            Wz, Wf = torch.chunk(self.Wzf, 2, dim=1)
-            # (shape: (n_units, n_units))
-            Uz, Uf = torch.chunk(self.Uzf, 2, dim=1)
+            Wz, Wf = torch.chunk(self.Wzf, 2, dim=1)  # (shape: (n_units, in_features))
+            Uz, Uf = torch.chunk(self.Uzf, 2, dim=1)  # (shape: (n_units, n_units))
             bz, bf = torch.chunk(self.bzf, 2, dim=0)  # (shape: (n_units, 1))
             Wz, Wf, Uz, Uf = Wz.t(), Wf.t(), Uz.t(), Uf.t()
 
-            sigma_f, Wf_norm, Uf_norm = self._gate_bounds(Wf, Uf, bf, self.gate_activation, p=p)
+            # Compute the bounds of the forget gate
+            sigma_f, Wf_norm, Uf_norm = self._gate_bounds(Wf, Uf, bf, self.gate_activation, p=p)  
 
+        # Compute the bounds of the update gate
         sigma_z, Wz_norm, Uz_norm = self._gate_bounds(Wz, Uz, bz, activation=self.gate_activation, p=p)
+        # Compute the bounds of the reset gate
         phi_r, Wr_norm, Ur_norm = self._gate_bounds(Wr, Ur, br, activation=self.input_activation, p=p)
 
-        return dict_of(
-            sigma_z,
-            sigma_f,
-            phi_r,
-            Wz_norm,
-            Wr_norm,
-            Wf_norm,
-            Uz_norm,
-            Ur_norm,
-            Uf_norm,
-        )
+        return dict_of(sigma_z, sigma_f, phi_r,
+                       Wz_norm, Wr_norm, Wf_norm,
+                       Uz_norm, Ur_norm, Uf_norm)
 
-    def iss_residuals(self) -> Tensor:
+    def iss_residuals(self) -> torch.Tensor:
         """
         Compute the residual of the ISS constraint
 
         Returns
         -------
-        Tensor
-            v: the residual of the ISS constraint
+        v : torch.Tensor
+            The residual of the ISS constraint
         """
         if self.gate_activation is not torch.sigmoid or self.input_activation is not torch.tanh:
             raise ValueError(
@@ -1111,18 +1363,18 @@ class StateSpaceGRU(StateSpaceRecurrentLayer):
         norms = self._get_norms(p=np.inf)
         return norms["Ur_norm"] * norms['sigma_f'] - 1
 
-    def deltaiss_residuals(self) -> Tensor:
+    def deltaiss_residuals(self) -> torch.Tensor:
         """
-        Compute the residual of the {\delta}ISS constraint
+        Compute the residual of the δISS constraint
 
         Returns
         -------
-        Tensor
-            v: the residual of the {\delta}ISS constraint
+        v : torch.Tensor
+            the residual of the δISS constraint
         """
         if self.gate_activation is not torch.sigmoid or self.input_activation is not torch.tanh:
             raise ValueError(
-                "The {\delta}ISS condition is valid when `gate_activation` is set to `torch.sigmoid` and `input_activation` is set to `torch.tanh`!"
+                "The δISS condition is valid when `gate_activation` is set to `torch.sigmoid` and `input_activation` is set to `torch.tanh`!"
             )
         norms = self._get_norms(p=np.inf)
 
@@ -1235,7 +1487,7 @@ class StateSpaceLSTM(StateSpaceRecurrentLayer):
         """
         return 2 * self.units
 
-    def forward(self, u: Tensor, x0: Tensor = None) -> Tuple[Tensor, Tensor]:
+    def forward(self, u: torch.Tensor, x0: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform the forward-pass of the LSTM
 
@@ -1243,14 +1495,14 @@ class StateSpaceLSTM(StateSpaceRecurrentLayer):
 
         Parameters
         ----------
-        u : Tensor
+        u : torch.Tensor
             Input u(k) of the LSTM layer, with shape `(batches, inputs)`
-        x0 : Tensor, optional
+        x0 : torch.Tensor, optional
             Current state x(k) of the LSTM, with shape `(batches, states)`, where `states = 2*n`, by default None
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
+        tuple[torch.Tensor, torch.Tensor]
             y : the output y(k), with shape `(batches, outputs)`
             xp : the new state x(k+1), with shape `(batches, states)`
         """
@@ -1285,10 +1537,10 @@ class StateSpaceLSTM(StateSpaceRecurrentLayer):
 
         return y, xp
 
-    def _get_norms(self, p: int = np.inf) -> Tuple[
-        Tuple[Tensor, Tensor, Tensor, Tensor],
-        Tuple[Tensor, Tensor, Tensor, Tensor],
-        Tuple[Tensor, Tensor, Tensor, Tensor],
+    def _get_norms(self, p: int = np.inf) -> tuple[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     ]:
         """
         [summary]
@@ -1336,13 +1588,13 @@ class StateSpaceLSTM(StateSpaceRecurrentLayer):
             Uc_norm,
         )
 
-    def iss_residuals(self) -> Tensor:
+    def iss_residuals(self) -> torch.Tensor:
         """
         Compute the residual of the ISS constraint
 
         Returns
         -------
-        Tensor
+        torch.Tensor
             v: the residual of the ISS constraint residuals
         """
         if self.gate_activation is not torch.sigmoid or self.state_activation is not torch.tanh:
@@ -1354,18 +1606,18 @@ class StateSpaceLSTM(StateSpaceRecurrentLayer):
 
         return norms["sigma_f"] + norms["sigma_o"] * norms["sigma_i"] * norms["Uc_norm"] - 1
         
-    def deltaiss_residuals(self) -> Tensor:
+    def deltaiss_residuals(self) -> torch.Tensor:
         """
-        Compute the residual of the {\delta}ISS constraint
+        Compute the residual of the δISS constraint
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
-            (v1, v2): the residual of the {\delta}ISS constraint residuals
+        tuple[torch.Tensor, torch.Tensor]
+            (v1, v2): the residual of the δISS constraint residuals
         """
         if self.gate_activation is not torch.sigmoid or self.state_activation is not torch.tanh:
             raise ValueError(
-                "The {\delta}ISS condition is valid when `gate_activation` is set to `torch.sigmoid` and `state_activation` is set to `torch.tanh`!"
+                "The δISS condition is valid when `gate_activation` is set to `torch.sigmoid` and `state_activation` is set to `torch.tanh`!"
             )
 
         norms = self._get_norms(p=2)
@@ -1390,8 +1642,8 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
     out_features: int
     horizon: int
     input_feedthrough: bool
-    activations: List[Callable]
-    lipschitz: List[float]
+    activations: list[Callable]
+    lipschitz: list[float]
     io_delay: bool
     trainable: bool
     origin_equilibrium: bool
@@ -1399,13 +1651,13 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
     def __init__(
         self,
-        units: List[int],
+        units: list[int],
         in_features: int,
         out_features: int,
         horizon: int,
         input_feedthrough: bool = False,
-        activations: List[Callable] | List[str] | Callable | str = torch.tanh,
-        lipschitz: List[float] | float = None,
+        activations: list[Callable] | list[str] | Callable | str = torch.tanh,
+        lipschitz: list[float] | float = None,
         io_delay: bool = True,
         trainable: bool = True,
         origin_equilibrium: bool = False,
@@ -1419,20 +1671,20 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
         Parameters
         ----------
-        units : List[int]
-            List of the number of neurons of the FFNN
+        units : list[int]
+            list of the number of neurons of the FFNN
         in_features : int
             Number of inputs
         out_features : int
             Number of outputs
         input_feedthrough: bool, optional
             Supply the input vector u to all the layers of the FFNN, by default False
-        activations : List[Callable], optional
-            List containing the activation function of each layer. If a single activation function is supplied,
+        activations : list[Callable], optional
+            list containing the activation function of each layer. If a single activation function is supplied,
             it is applied to all layers. Note that the activation function f(x) must be such that f(0) = 0,
             and Lipschitz-continuous. By default `torch.sigmoid`
-        lipschitz : List[float], optional
-            List of the Lipschitz constants of the activation functions, only necessary for stability residuals computations.
+        lipschitz : list[float], optional
+            list of the Lipschitz constants of the activation functions, only necessary for stability residuals computations.
             If omitted, and the activation functions are the canonical ones, it is inferred. By default None.
         io_delay : bool, optional
             Return the state at the previous time instant, by default True
@@ -1475,7 +1727,7 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
 
         # Check Lipschitz constants
-        if isinstance(lipschitz, List) and len(lipschitz) == len(self.activations):
+        if isinstance(lipschitz, list) and len(lipschitz) == len(self.activations):
             self.lipschitz = lipschitz
         elif isinstance(lipschitz, float):
             self.lipschitz = [lipschitz] * self.M
@@ -1498,7 +1750,7 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
         U = [None] * (self.M if self.input_feedthrough else 1)
         b = [None] * self.M
 
-        # Build parameters and save them in a ParameterList
+        # Build parameters and save them in a Parameterlist
         for i, n in enumerate(self.units):
             if i == 0:
                 W[i] = Parameter(torch.zeros(self.in_features, n), requires_grad=trainable)
@@ -1560,7 +1812,7 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
         """
         return self._state_size
 
-    def forward(self, u: Tensor, x0: Tensor = None) -> Tuple[Tensor, Tensor]:
+    def forward(self, u: torch.Tensor, x0: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Perform the forward-pass of the NNARX
 
@@ -1568,14 +1820,14 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
         Parameters
         ----------
-        u : Tensor
+        u : torch.Tensor
             Input u(k) of the NNARX, with shape `(batches, inputs)`
-        x0 : Tensor, optional
+        x0 : torch.Tensor, optional
             Current state x(k) of the NNARX, with shape `(batches, states)`, by default None
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
+        tuple[torch.Tensor, torch.Tensor]
             y : the output y(k), with shape `(batches, outputs)`
             xp : the new state x(k+1), with shape `(batches, states)`
         """
@@ -1594,14 +1846,14 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
         return y, xp
 
-    def _get_norms(self) -> Tuple[List[Tensor], Tensor]:
+    def _get_norms(self) -> tuple[list[torch.Tensor], torch.Tensor]:
         """
         Retrieve the norms of the U[i] matrices
 
         Returns
         -------
-        Tuple[Tensor, Tensor]
-            A Tensor containing all the norms of U matrices, and their product
+        tuple[torch.Tensor, torch.Tensor]
+            A torch.Tensor containing all the norms of U matrices, and their product
         """
         U_norms_list = [torch.linalg.norm(Ui.t(), ord=2) for Ui in self.U] + \
             [torch.linalg.norm(self.U0.t(), ord=2)]
@@ -1609,26 +1861,26 @@ class StateSpaceNNARX(StateSpaceRecurrentLayer):
 
         return U_norms, U_norms.prod()
 
-    def iss_residuals(self) -> Tensor:
+    def iss_residuals(self) -> torch.Tensor:
         """
         Compute the residual of the ISS constraint
 
         Returns
         -------
-        Tensor
+        torch.Tensor
             v: the residual of the ISS constraint
         """
         _, U_prod = self._get_norms()
         return U_prod - 1 / (np.prod(self.lipschitz) * np.sqrt(self.N))
 
-    def deltaiss_residuals(self) -> Tensor:
+    def deltaiss_residuals(self) -> torch.Tensor:
         """
-        Compute the residual of the {\delta}ISS constraint
+        Compute the residual of the δISS constraint
 
         Returns
         -------
-        Tensor
-            v: the residual of the {\delta}ISS constraint
+        torch.Tensor
+            v: the residual of the δISS constraint
         """
         return self.iss_residuals()
 
@@ -1643,8 +1895,8 @@ class PieceWiseRegularizer(nn.Module):
         return self.omega_plus * torch.max(torch.zeros_like(x), x + self.clearance) \
                 - self.omega_minus * torch.min(torch.zeros_like(x), x + self.clearance)
 
-    def forward(self, residuals: torch.Tensor | List[torch.Tensor]):
-        if isinstance(residuals, List):
+    def forward(self, residuals: torch.Tensor | list[torch.Tensor]):
+        if isinstance(residuals, list):
             losses = [self._piecewise(res) for res in residuals]
             return sum(losses)
         else:
@@ -1667,8 +1919,8 @@ class GeneralizedPieceWiseRegularizer(nn.Module):
         return self.omega_minus * (x + self.clearance) \
                 + (self.omega_plus - self.omega_minus) / self.k * (torch.log(1 + torch.exp(self.k * (x + self.clearance))) - math.log(2.0))
 
-    def forward(self, residuals: torch.Tensor | List[torch.Tensor]):
-        if isinstance(residuals, List):
+    def forward(self, residuals: torch.Tensor | list[torch.Tensor]):
+        if isinstance(residuals, list):
             losses = [self._smoothedpw(res) for res in residuals]
             return sum(losses)
         else:
